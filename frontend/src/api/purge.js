@@ -1,0 +1,1 @@
+import{api,post}from'./client.js';export const list=dataset_id=>api('/purges'+(dataset_id?'?dataset_id='+dataset_id:''));export const create=data=>post('/purges',data);export const detail=id=>api('/purges/'+id);export const retry=id=>post('/purges/'+id+'/retry',{});

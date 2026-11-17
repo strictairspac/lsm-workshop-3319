@@ -5,10 +5,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 from .config.database import engine
-from .routes import auth,dataset,config,trial,audit
+from .routes import auth,dataset,config,trial,audit,purge
 from .middlewares.audit import AuditMiddleware
 from .middlewares.request_id import RequestIdMiddleware
-from .services.trial import queue
+from .services.queue import queue
 @asynccontextmanager
 async def lifespan(app):
     if os.getenv('SEED_DEMO','true')=='true':
@@ -28,4 +28,4 @@ async def db_error(request:Request,exc):
 def health():
     with engine.connect() as c:c.execute(text('SELECT 1'))
     queue.ping();return {'status':'ok'}
-for router in (auth.router,dataset.router,config.router,trial.router,audit.router):app.include_router(router)
+for router in (auth.router,dataset.router,config.router,trial.router,audit.router,purge.router):app.include_router(router)

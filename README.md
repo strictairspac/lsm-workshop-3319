@@ -12,13 +12,14 @@
 - 层级配置：memtable 不同键容量、SSTable 合并触发数、层级上限、最终完整合并开关。
 - 合并队列：创建试验时持久化输入及配置快照，Redis 分发，独立 worker 执行并记录状态。
 - 读放大证据：显示合并前后层级、读写放大、真实存活键、Oracle 摘要、刷盘/合并轨迹、JSON 导出。
+- 永久清理：按批次选键，删除原值、关联试验输入与结果、落盘文件；保留试验标识与历史指标。
 - 管理员审计：记录写操作账号、路由与 HTTP 结果，包含权限拒绝。
 
 | 角色 | 页面与权限 | 典型动作 |
 |---|---|---|
-| admin 管理员 | 全业务页面与审计 | 登记批次/配置、执行、导出、查看审计 |
-| operator 操作员 | 四业务页面，不可看管理员审计 | 新建输入与配置、提交 worker、检查与下载结果 |
-| viewer 观察员 | 四业务页面只读与导出 | 阅读层级和 Oracle 证据，写请求在 API 层403 |
+| admin 管理员 | 全业务页面与审计 | 登记批次/配置、执行、导出、发起清理、查看审计 |
+| operator 操作员 | 五业务页面，不可看管理员审计 | 新建输入与配置、提交 worker、检查与下载结果、发起清理 |
+| viewer 观察员 | 五业务页面只读与导出 | 阅读层级和 Oracle 证据，写请求在 API 层403 |
 
 ## 启动与账号
 
@@ -49,8 +50,19 @@ docker compose down -v --remove-orphans
 6. 09:25 打开读放大证据，确认早班输入最终6个存活键，sensor-02/03未复活。
 7. 09:30 下载 `lsm-trial-<id>.json`，包含操作/配置快照、层级、轨迹与校验和。
 8. 09:40 viewer复核，创建试验被403拒绝；10:00 admin检查操作审计。
+9. 需要移除某传感器原值时，在“永久清理”页按批次勾选该键；受理后原值不可查看或下载，该批次暂停新试验，worker 删除关联快照与文件，留下试验标识与指标。
 
 Seed另含“旧值复活回归集”和“全部删除边界集”；配置另含“保留层级观测”和“宽缓冲-完整合并”。账户、批次、配置以自然键查缺插入，重复seed不改变已存在字段。
+
+## 永久清理原值
+
+批次页面或“永久清理”页可选择键发起清理。受理即为屏障：所选键的原值立即从批次、试验输入快照、试验结果与导出中消失，新试验对该批次返回409暂停，其他批次与试验照常。worker 随后物理删除批次操作、各关联试验快照与结果中的这些键，并删除包含原值的落盘证据文件。
+
+- 只删除选中的键；试验标识、名称、状态及不含原值的历史指标（读放大、写放大、存活键数、轨迹等）保留。
+- 覆盖原值的实际/Oracle 校验和一并撤回，避免用短值哈希反推原值。
+- 同一批次同一组键重复发起复用原任务，不重复登记；不同键组的任务可叠加，后一次不会删除前一次的键或无关键。
+- 状态由 pending→running→completed；失败为 failed 并保留原因、可重试。元数据先提交、文件后删，删文件中途中断时按已记录的待删列表重试，不会重复或误删。
+- worker 启动或空闲时从 MySQL 恢复 pending/running 清理任务；清理受理期间完成的试验只保存已脱敏结果，也不会新写证据文件。
 
 ## 核心算法与指标口径
 
@@ -74,10 +86,10 @@ Seed另含“旧值复活回归集”和“全部删除边界集”；配置另�
 | frontend | 原生HTML/CSS/JS ES模块，Nginx1.27，土橙材料样本册视觉 |
 | backend | Python3.11、FastAPI、SQLAlchemy、PyMySQL、JWT与PBKDF2密码 |
 | worker | 独立Python进程，Redis BLPOP，LSM演算，数据库恢复队列，心跳健康检查 |
-| db | MySQL8.0，持久化3个业务实体、用户与审计 |
+| db | MySQL8.0，持久化3个业务实体、清理任务、用户与审计 |
 | redis | Redis7，异步队列与持久卷 |
 
-`backend/src/`分为config/models/schemas/services/controllers/routes/middlewares/utils/constants；`backend/scripts/seed_demo.py`种子与初始化；`backend/migrations/README.md`为schema v1说明。3实体dataset/config/trial各自贯穿model/schema/service/route、前端api/store/page。试验结果保存在Trial JSON字段中，详情页为独立业务页面。
+`backend/src/`分为config/models/schemas/services/controllers/routes/middlewares/utils/constants；`backend/scripts/seed_demo.py`种子与初始化；`backend/migrations/README.md`为schema v1说明。3实体dataset/config/trial各自贯穿model/schema/service/route、前端api/store/page。试验结果保存在Trial JSON字段中，详情页为独立业务页面。清理任务purge贯穿model/schema/route、前端api/store/page，执行逻辑在`services/purge.py`，与worker共享。
 
 `frontend/src/`包含api/stores/types/components/common/hooks/pages/router/utils/constants，表格/状态/页头跨页共享，HTML转义与反馈工具复用。角色/任务状态/操作类型枚举在`backend/src/constants/enums.py`和`frontend/src/constants/enums.js`。模型默认任务状态使用后端枚举，前端状态组件使用前端枚举。
 
@@ -92,7 +104,8 @@ Docker恰好5服务，全部healthcheck；backend依赖db/redis healthy，worker
 - 存储过程为内存教学模型，忽略磁盘块、压缩、Bloom过滤器、WAL持久化、并行compaction与真实故障恢复。MySQL负责保存网页业务输入和输出。
 - 前端创建独立批次/配置，不提供原记录编辑删除；新版本新建记录，试验总是固定输入快照。
 - 最终全历史合并允许去掉墓碑；没有模拟跨副本历史/快照读，因此不能将该规则直接用于生产数据库。
-- 单worker与按钮刷新；不提供多worker分布式锁、SSE。
+- 单worker与按钮刷新；不提供多worker分布式锁、SSE。清理进度为轮询，受理后立即屏蔽原值，物理删除由worker异步完成。
+- 清理按键名匹配，不区分该键在某次试验中是否被判为墓碑；删除后批次与快照可能为空，空批次不能再发起新试验。
 - Web双字体来自Google Fonts，离线回退到serif/monospace。
 
 MIT License，见LICENSE。实际测试与截图位于批次的`test-artifacts/gb-4106/`，源码内不保存测试证据。
